@@ -36,7 +36,7 @@ jobs:
         chmod 600 ~/.ssh/known_hosts
 
     - name: Set Up QEMU
-      uses: docker/setup-qemu-action@v3
+      uses: docker/setup-qemu-action@v4
 
     - name: Build And Push
       env:
