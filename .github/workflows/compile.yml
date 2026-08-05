@@ -1,5 +1,5 @@
-name: Compile (public CI)
-run-name: "${{ inputs.project_tag }} compile"
+name: Public CI
+run-name: "${{ inputs.project_tag }} 触发编译"
 on:
   workflow_dispatch:
     inputs:
