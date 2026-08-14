@@ -1,5 +1,5 @@
 name: Public CI
-run-name: "${{ inputs.project_tag }} 触发编译"
+run-name: "${{ inputs.project_tag }}-${{ inputs.source_sha }}-触发编译"
 on:
   workflow_dispatch:
     inputs:
@@ -18,12 +18,34 @@ on:
         required: false
         type: string
         default: "unknown"
+      source_sha:
+        description: "开发库 head SHA (前 7 位)"
+        required: false
+        type: string
+        default: "manual"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ inputs.project_tag }}
+      cancel-in-progress: true
 
     steps:
+    - name: Validate source_name
+      env:
+        SOURCE_NAME: ${{ inputs.source_name }}
+      run: |
+        case "$SOURCE_NAME" in
+          TaskManageDev|pt-keepalive|AutoTransmitUploadDown|AutoTransmitUploadRSS)
+            echo "[validate] source_name=$SOURCE_NAME OK"
+            ;;
+          *)
+            echo "::error::source_name '$SOURCE_NAME' 不在白名单 (TaskManageDev/pt-keepalive/AutoTransmitUploadDown/AutoTransmitUploadRSS),拒绝执行"
+            exit 1
+            ;;
+        esac
+
     - name: Setup SSH
       env:
         CI_SSH_KEY: ${{ secrets.CI_SSH_KEY }}
