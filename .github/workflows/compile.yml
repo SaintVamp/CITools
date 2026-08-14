@@ -1,0 +1,163 @@
+name: Public CI
+run-name: "${{ inputs.project_tag }} 触发编译"
+on:
+  workflow_dispatch:
+    inputs:
+      source_name:
+        description: "开发库名"
+        required: false
+        type: string
+        default: "unknown"
+      target_name:
+        description: "发布库名"
+        required: false
+        type: string
+        default: "unknown"
+      project_tag:
+        description: "ATUS tag"
+        required: false
+        type: string
+        default: "unknown"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Setup SSH
+      env:
+        CI_SSH_KEY: ${{ secrets.CI_SSH_KEY }}
+        ALL_KNOWN_HOSTS: ${{ secrets.ALL_KNOWN_HOSTS }}
+      run: |
+        mkdir -p ~/.ssh
+        echo "$CI_SSH_KEY" > ~/.ssh/id_ed25519
+        chmod 600 ~/.ssh/id_ed25519
+        echo "$ALL_KNOWN_HOSTS" > ~/.ssh/known_hosts
+        chmod 600 ~/.ssh/known_hosts
+
+    - name: Set Up QEMU
+      uses: docker/setup-qemu-action@v4
+
+    - name: Build And Push
+      timeout-minutes: 25
+      env:
+        SOURCE_NAME: ${{ inputs.source_name }}
+        TARGET_NAME: ${{ inputs.target_name }}
+        PROJECT_TAG: ${{ inputs.project_tag }}
+        ATUS_BASE_URL: ${{ secrets.ATUS_BASE_URL }}
+      run: |
+        git config --global user.email "25300520+saintvamp@users.noreply.github.com"
+        git config --global user.name "SaintVamp"
+        source_name="${SOURCE_NAME}"
+        target_name="${TARGET_NAME}"
+        atus_base_url="${ATUS_BASE_URL}"
+
+        cd /home/runner
+        rm -rf "${source_name}" "${target_name}"
+
+        echo "--------- pull CITools/commit.sh ---------"
+        curl -sSfL --retry 3 \
+          "https://raw.githubusercontent.com/SaintVamp/CITools/main/commit.sh?t=$(date +%s)" \
+          -o /home/runner/commit.sh
+        chmod +x /home/runner/commit.sh
+
+        rm -f /home/runner/gitee_push_failed /home/runner/pending_release_info
+        rm -f .gitee_push_failed .gitee_back_sync_failed .pending_release_info
+
+        git clone --single-branch "git@github.com:SaintVamp/${source_name}.git"
+        cd "${source_name}"
+        temp=$(git log -1 --pretty=format:%s)
+        echo "temp=$temp"
+        git remote add gitee "git@gitee.com:saintvamp/${source_name}.git"
+        git push gitee master --force
+        cd /home/runner
+        git clone "git@github.com:SVGROUP/${target_name}.git" "${target_name}"
+
+        compiled=0
+
+        echo "--------- compile amd64 (x86_64) ---------"
+        rm -f "/home/runner/${source_name}/no_push"
+        docker run --rm --platform linux/amd64 -e TARGET_ARCH=x86_64 \
+          -v "/home/runner/${source_name}":"/Compile/${source_name}" \
+          -v "/home/runner/${target_name}":"/Compile/${target_name}" \
+          saintvamp/compile:2.1 sh -c "cd ${source_name} && sh setup.sh \"${temp}\" \"${source_name}\" \"${target_name}\""
+        echo "---finish amd64---"
+        [ ! -f "/home/runner/${source_name}/no_push" ] && compiled=1
+
+        if [ -f "/home/runner/${source_name}/compiled_hashes.json" ]; then
+          sudo chown runner:runner "/home/runner/${source_name}/compiled_hashes.json"
+          cp -f "/home/runner/${source_name}/compiled_hashes.json" "/home/runner/${target_name}/compiled_hashes.json"
+        fi
+
+        echo "--------- compile arm64 (aarch64, QEMU) ---------"
+        rm -f "/home/runner/${source_name}/no_push"
+        docker run --rm --platform linux/arm64 -e TARGET_ARCH=aarch64 \
+          -v "/home/runner/${source_name}":"/Compile/${source_name}" \
+          -v "/home/runner/${target_name}":"/Compile/${target_name}" \
+          saintvamp/compile:2.1 sh -c "cd ${source_name} && sh setup.sh \"${temp}\" \"${source_name}\" \"${target_name}\""
+        echo "---finish arm64---"
+        [ ! -f "/home/runner/${source_name}/no_push" ] && compiled=1
+
+        cd "/home/runner/${source_name}"
+        sudo chown -R runner:runner /home/runner/${source_name} /home/runner/${target_name}
+
+        if [ "$compiled" = "1" ]; then
+          echo "--------- publish (runner side, no docker) ---------"
+          rm -f no_push
+          sh commit_file/update.sh "/home/runner" "${temp}" "${source_name}" "${target_name}"
+          python3 create_git_hash.py
+          echo "-----move compile hash to ${target_name}----"
+          mv -f compiled_hashes.json "/home/runner/${target_name}/compiled_hashes.json"
+        else
+          echo "[publish] 两遍均无重编产物，跳过 add/commit/github push，仅走 back-sync 兜底"
+        fi
+
+        bash /home/runner/commit.sh "${temp}" "${target_name}" "${atus_base_url}"
+
+    - name: Notify via ATUS on failure
+      if: failure()
+      env:
+        ATUS_BASE_URL: ${{ secrets.ATUS_BASE_URL }}
+        FS_TOKEN: ${{ secrets.FS_TOKEN }}
+        FS_SECRET: ${{ secrets.FS_SECRET }}
+        REPO: ${{ github.repository }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        PROJECT_TAG: ${{ inputs.project_tag }}
+      run: |
+        if [ -z "$ATUS_BASE_URL" ] || [ -z "$FS_TOKEN" ]; then
+          echo "[notify] ATUS_BASE_URL 或 FS_TOKEN 未配置，跳过告警"
+          exit 0
+        fi
+        payload=$(python3 -c "import json,os; title='⛔ '+os.environ['PROJECT_TAG']+' 公共库 CI 发布失败'; content='repo: '+os.environ.get('REPO','')+'\n'+'run: '+os.environ.get('RUN_URL',''); print(json.dumps({'title':title,'content':content,'channel':'feishu','feishu_hook_token':os.environ['FS_TOKEN'],'feishu_secret':os.environ.get('FS_SECRET','')}))")
+        curl -sS -X POST "${ATUS_BASE_URL%/}/sv/notify/send" \
+          -H "Content-Type: application/json" \
+          -d "$payload" || true
+        echo
+
+    - name: Notify via ATUS on gitee mirror failure (release aborted)
+      if: success() && hashFiles('.gitee_push_failed') != ''
+      env:
+        ATUS_BASE_URL: ${{ secrets.ATUS_BASE_URL }}
+        FS_TOKEN: ${{ secrets.FS_TOKEN }}
+        FS_SECRET: ${{ secrets.FS_SECRET }}
+        REPO: ${{ github.repository }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        PROJECT_TAG: ${{ inputs.project_tag }}
+      run: |
+        if [ -z "$ATUS_BASE_URL" ] || [ -z "$FS_TOKEN" ]; then
+          echo "[notify] ATUS_BASE_URL 或 FS_TOKEN 未配置，跳过告警"
+          exit 0
+        fi
+        pending_hash=""
+        pending_ts=""
+        if [ -f .pending_release_info ]; then
+          pending_hash=$(grep '^release_hash=' .pending_release_info | cut -d= -f2-)
+          pending_ts=$(grep '^build_ts=' .pending_release_info | cut -d= -f2-)
+        fi
+        export PENDING_HASH="$pending_hash"
+        export PENDING_TS="$pending_ts"
+        payload=$(python3 -c "import json,os; tag=os.environ['PROJECT_TAG']; base=os.environ['ATUS_BASE_URL'].rstrip('/'); ph=(os.environ.get('PENDING_HASH','') or '').strip(); pts=(os.environ.get('PENDING_TS','') or '').strip(); nv='curl -X POST '+base+'/sv/auth/api/new_version -H \"Content-Type: application/json\" -d \'{\\"t\\":\\"'+tag+'\\",\\"v\\":'+(pts or '0')+',\\"m\\":\\"\\",\\"h\\":\\"'+ph+'\\"}\\''; fn='curl '+base+'/sv/auth/api/force_now?t='+tag; parts=['⛔ '+tag+' 发布中止：gitee 镜像 push 失败','repo: '+os.environ.get('REPO',''),'run: '+os.environ.get('RUN_URL',''),'pending: hash='+(ph or 'n/a')[:12]+' ts='+(pts or 'n/a'),'方案A：重跑 workflow（推荐）','方案B：手动同步 gitee 后执行：','1) '+nv,'2) '+fn]; content='\n'.join(parts); print(json.dumps({'title':'⛔ '+tag+' 发布中止','content':content,'channel':'feishu','feishu_hook_token':os.environ['FS_TOKEN'],'feishu_secret':os.environ.get('FS_SECRET','')}))")
+        curl -sS -X POST "${ATUS_BASE_URL%/}/sv/notify/send" \
+          -H "Content-Type: application/json" \
+          -d "$payload" || true
+        echo
