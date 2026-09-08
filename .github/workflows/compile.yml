@@ -37,11 +37,11 @@ jobs:
         SOURCE_NAME: ${{ inputs.source_name }}
       run: |
         case "$SOURCE_NAME" in
-          TaskManageDev|pt-keepalive|AutoTransmitUploadDown|AutoTransmitUploadRSS)
+          TaskManageDev|pt-keepalive|AutoTransmitUploadDown|AutoTransmitUploadRss)
             echo "[validate] source_name=$SOURCE_NAME OK"
             ;;
           *)
-            echo "::error::source_name '$SOURCE_NAME' 不在白名单 (TaskManageDev/pt-keepalive/AutoTransmitUploadDown/AutoTransmitUploadRSS),拒绝执行"
+            echo "::error::source_name '$SOURCE_NAME' 不在白名单 (TaskManageDev/pt-keepalive/AutoTransmitUploadDown/AutoTransmitUploadRss),拒绝执行"
             exit 1
             ;;
         esac
